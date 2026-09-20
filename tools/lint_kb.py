@@ -5,6 +5,9 @@
 三道闸门（口径 §四）
   A1 引用可解析   md 中所有 `文件#id` 逐个在语料命中；`@@` 占位符残留 0
   A2 数字可复算   md 中数字 == tools/voice.py 重算值（保留位数按 M1–M8）
+                  · 角色指南：按「模式行 × 指标列」逐格复算
+                  · 速查表（kind=table）：横向表角色可落在前 3 格；复算 E2-cn/行数(E2)/E1；
+                    并校验表格内外所有 `值（M#/E#）` 标注（同行角色或全队并集）与派生算式
   A3 术语有来源   每个术语/专名/称呼条目带来源（`文件#id` 或统计命令）
 
 三条结构约束（口径 §三 硬规定）
@@ -40,10 +43,14 @@ import voice as V           # noqa: E402
 # ──────────────────────────────────────────────── 常量
 
 MDP = {"M1": 0, "M1_text": 0, "M2": 1, "M3": 1, "M2_text": 1, "M3_text": 1,
-       "M4": 1, "M5": 2, "M6": 1, "M7": 1, "M8": 0, "H": 0}
+       "M4": 1, "M5": 2, "M6": 1, "M7": 1, "M8": 0, "H": 0,
+       "E1": 1, "E2cn": 2, "E2rows": 0}
 METRIC_RE = re.compile(r"\bM(\d)(_text)?\b")
 ANNOT_RE = re.compile(r"(\d+(?:\.\d+)?)[\s*]*(?:%|％)?[\s*]*[（(]\s*(M\d(?:_text)?)\s*[)）]")
 LABEL_NUM_RE = re.compile(r"\b(M\d(?:_text)?)[\s*]*[:：=][\s*]*(\d+(?:\.\d+)?)")
+# 速查表（kind=table）专用：允许 E1 / E2-xx 也带标注（角色分支仍只用 ANNOT_RE）
+ANNOT_ANY_RE = re.compile(
+    r"(\d+(?:\.\d+)?)[\s*]*(?:%|％)?[\s*]*[（(]\s*(M\d(?:_text)?|E1|E2-(?:kr|en|cn))\s*[)）]")
 NUM_RE = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)(?![\d])")
 DEC_RE = re.compile(r"(?<![\d.])\d+\.\d+(?![\d])")
 ARITH_RE = re.compile(r"([\d.]+(?:\s*\+\s*[^=\d\n]*?[\d.]+)+)\s*=\s*\**\s*(\d+(?:\.\d+)?)")
@@ -176,7 +183,7 @@ def cell_metric(cell: str) -> str | None:
     if m:
         return "M" + m.group(1) + (m.group(2) or "")
     if re.search(r"E2|敬称", t):
-        return "E2cn"
+        return "E2rows" if "行数" in t else "E2cn"
     if re.search(r"E1|主题语域", t):
         return "E1"
     for kw, met in _HDR_KEYWORDS:
@@ -244,6 +251,27 @@ def allowed_map(m: dict) -> dict[str, set[str]]:
     return amap
 
 
+def expected_annot(m: dict, tok: str) -> float | None:
+    """标注 token（M#/E1/E2-xx）→ 期望值；无单值定义时返回 None（转 amap 兜底）。"""
+    if tok == "E2-kr":
+        return m["E"]["hon"]["kr"]["pct"]
+    if tok == "E2-en":
+        return m["E"]["hon"]["en"]["pct"]
+    if tok == "E2-cn":
+        return expected_for(m, "E2cn", None)
+    if tok == "E1":
+        return expected_for(m, "E1", None)
+    return expected_for(m, tok, None)
+
+
+def annot_value_ok(written: str, tok: str, m: dict, amap: dict[str, set[str]]) -> bool:
+    """`值（M#/E#）` 是否成立：有单值定义则精确比对，否则须落在该角色指标集内。"""
+    exp = expected_annot(m, tok)
+    if exp is not None:
+        return num_ok(written, exp, MDP.get(tok, 1))
+    return written in amap
+
+
 def expected_for(m: dict, metric: str, pat: str | None) -> float | None:
     if metric == "M1":
         return m["L"]
@@ -261,6 +289,8 @@ def expected_for(m: dict, metric: str, pat: str | None) -> float | None:
         return m["E"]["theme"]["pct"]
     if metric == "E2cn":
         return m["E"]["hon"]["cn"]["pct"]
+    if metric == "E2rows":
+        return m["E"]["hon"]["cn"]["rows"]
     if pat is None:
         return None
     p = m["pats"].get(pat)
@@ -460,7 +490,34 @@ def check_a2(body: str, kind: str, role_cn: str | None) -> tuple[list[str], list
         return fails, warns, used, checked
 
     if kind == "table":
-        for tb in parse_tables(body):
+        bn = body.replace("`", " ")          # 去反引号，保持字符偏移
+        tables = parse_tables(bn)
+        table_lines: set[int] = set()
+        for tb in tables:
+            table_lines.update(range(tb["start"], tb["end"]))
+
+        # ③ 先做算式验算（后面的标注扫描要跳过算式命中区）
+        arith_spans: list[tuple[int, int]] = []
+        result_spans: list[tuple[int, int]] = []
+        for mo in ARITH_RE.finditer(bn):
+            line = bn[:mo.start()].count("\n") + 1
+            addends = [fnum(x) for x in NUM_RE.findall(mo.group(1))]
+            res = fnum(mo.group(2))
+            dp = len(mo.group(2).split(".")[1]) if "." in mo.group(2) else 0
+            if res is None or not addends:
+                continue
+            checked += 1
+            arith_spans.append((mo.start(), mo.end()))
+            result_spans.append((mo.start(2), mo.end(2)))
+            if abs(sum(addends) - res) >= 0.5 * 10 ** (-dp) + 1e-9:
+                fails.append(f"L{line} 算式不成立：{' + '.join(f'{x:g}' for x in addends)} "
+                             f"= {mo.group(2)}（应为 {sum(addends):.{dp}f}）")
+
+        def in_spans(pos: int, spans: list) -> bool:
+            return any(a <= pos < b for a, b in spans)
+
+        # ① 表格：指标列逐格复算 + 非指标列的行内标注
+        for tb in tables:
             cols: dict[int, tuple[str, str | None]] = {}
             for i, h in enumerate(tb["header"]):
                 pat = cell_pattern(h)
@@ -470,14 +527,19 @@ def check_a2(body: str, kind: str, role_cn: str | None) -> tuple[list[str], list
             for lineno, cells in tb["rows"]:
                 if not cells:
                     continue
+                # 角色可能在第 1 格（量化总表）或第 2 格（带「排名」列的横向表）
                 role = None
-                for cn in V.BY_CN:
-                    if cn in cells[0]:
-                        role = cn
+                for c in cells[:3]:
+                    for cn in V.BY_CN:
+                        if cn in c:
+                            role = cn
+                            break
+                    if role:
                         break
                 if not role:
                     continue
                 m = role_metrics(role)
+                amap = allowed_map(m)
                 for i, (met, pat) in cols.items():
                     if i >= len(cells):
                         continue
@@ -492,6 +554,56 @@ def check_a2(body: str, kind: str, role_cn: str | None) -> tuple[list[str], list
                     if not num_ok(mo.group(1), exp, MDP.get(met, 1)):
                         fails.append(f"L{lineno+1} {role} {met} 写 {mo.group(1)} ≠ "
                                      f"{exp:.{MDP.get(met,1)}f}")
+                # 非指标列里的 `值（M#/E#）` 必须落在该行角色的指标集内
+                # （含 `=` 的单元格是派生值算式，已由 ③ 验算，不再单独查标注）
+                for i, cell in enumerate(cells):
+                    if i in cols:
+                        continue
+                    txt = cell.replace("**", "")
+                    if "=" in txt:
+                        continue
+                    for mo in ANNOT_ANY_RE.finditer(txt):
+                        checked += 1
+                        used.add(mo.group(2))
+                        if not annot_value_ok(mo.group(1), mo.group(2), m, amap):
+                            fails.append(f"L{lineno+1} {role} 标注 `{mo.group(0)}` "
+                                         f"不在其指标集内")
+                    for mo in LABEL_NUM_RE.finditer(txt):
+                        checked += 1
+                        used.add(mo.group(1))
+                        if not annot_value_ok(mo.group(2), mo.group(1), m, amap):
+                            fails.append(f"L{lineno+1} {role} 标注 `{mo.group(0)}` "
+                                         f"不在其指标集内")
+
+        # ② 表格外散文：`值（M#/E#）` 落在同行角色（否则任一角色）的指标集内
+        amaps = {cn: allowed_map(role_metrics(cn)) for cn in V.BY_CN}
+        union: dict[str, set[str]] = {}
+        for _cn, am in amaps.items():
+            for v, labels in am.items():
+                union.setdefault(v, set()).update(labels)
+
+        prose_lines = bn.split("\n")
+
+        def prose_annot(pos: int, val: str, tok: str) -> None:
+            nonlocal checked
+            lineno = bn[:pos].count("\n")
+            if lineno in table_lines or in_spans(pos, result_spans):
+                return
+            checked += 1
+            used.add(tok)
+            line = prose_lines[lineno]
+            role_line = next((cn for cn in V.BY_CN if cn in line), None)
+            if role_line:
+                if not annot_value_ok(val, tok, role_metrics(role_line), amaps[role_line]):
+                    fails.append(f"L{lineno+1} 标注 `{val}（{tok}）` "
+                                 f"不匹配 {role_line} 的 {tok} 指标值")
+            elif val not in union:
+                fails.append(f"L{lineno+1} 标注 `{val}（{tok}）` 不匹配任何角色的 {tok} 指标值")
+
+        for mo in ANNOT_ANY_RE.finditer(bn):
+            prose_annot(mo.start(1), mo.group(1), mo.group(2))
+        for mo in LABEL_NUM_RE.finditer(bn):
+            prose_annot(mo.start(2), mo.group(2), mo.group(1))
         return fails, warns, used, checked
 
     warns.append("A2 跳过：非角色指标文档（无 M1–M8 复算基准）")
