@@ -1,0 +1,51 @@
+# llc-llm-workflow · 源声明
+#
+# 本文件取代任何「兼容层/符号链接」——所有工具只从这里的路径读输入。
+# 口径契约见 SPEC.md。
+
+[corpus]
+# ── 原始语料（只读输入，永不改动）────────────────────────────
+# 官方三语：游戏本体 Assets/Resources_moved/Localize/{kr,en,jp}
+#   ⚠️ 文件带语言前缀 KR_ / EN_ / JP_，且编码为 UTF-8 BOM
+game_localize = "corpus/game/localize"
+game_manifest = "corpus/game/manifest"
+
+# 零协：Release 解包（基线，含 Info/version.json）
+llc_base      = "corpus/llc-base/LimbusCompany_Data/Lang/LLC_zh-CN"
+# 零协：GitHub 仓镜像（四语 + 97 个日期 tag，用于历史快照/交叉校验）
+llc_repo      = "corpus/llc-repo"
+
+# 前作官方文本（用于回归角色既有译名）
+lor           = "corpus/lor/LOR-TextAsset"
+lc            = "corpus/lc/Language"
+
+[build]
+# 中间产物目录（可重建，不入 git）
+dir = "build"
+
+[kb]
+# 交付物目录（markdown 知识库）
+dir = "kb"
+
+[base]
+# 语料基准标识（写入每份 md 的头部）
+llc_version   = "2026090501"
+snapshot_date = "2026-09-17"
+
+[lang]
+# 逻辑语言代码 → 官方文件前缀（G1：去前缀后与零协对齐）
+codes  = ["kr", "en", "jp", "cn"]
+prefix = { kr = "KR_", en = "EN_", jp = "JP_", cn = "" }
+# 跳过目录（G1）
+skip_dirs = ["Info", "Font"]
+
+[voice]
+# 口吻基准（G5 / §2.0）
+# L       = 遍历 dataList + kr model 匹配 + en/cn 均非空
+# L_text  = L 且 en 含 [A-Za-z] 且 cn 含汉字
+require_text_for_avg = true   # M2/M3/M5 用 L_text；M1/M4/M6/M7/M8 用 L
+ellipsis_count_as    = 1      # 「……」按 1 次计
+
+[authority]
+# 权威分层（SPEC §六）
+tiers = ["零协权威", "自拟待确认"]
